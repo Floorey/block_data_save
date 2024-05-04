@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"math/rand"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -25,6 +27,7 @@ type Block struct {
 	TwoSDLower float64
 	TwoSDUpper float64
 	Outliers   []float64
+	Text       string
 }
 
 // Blockchain struct
@@ -46,9 +49,13 @@ func NewBlockchain() *Blockchain {
 		TwoSDLower: 0.0,
 		TwoSDUpper: 0.0,
 		Outliers:   nil,
+		Text:       "",
 	}
 	genesisBlock.Hash = calculateHash(genesisBlock)
-	return &Blockchain{chain: []*Block{genesisBlock}}
+
+	return &Blockchain{
+		chain: []*Block{genesisBlock},
+	}
 }
 
 // AddBlock adds a new block to the blockchain
@@ -73,8 +80,6 @@ func (bc *Blockchain) AddBlock(values []float64) {
 	bc.markBlocksWithOutliers()
 	newBlock.Hash = calculateHash(newBlock)
 	bc.chain = append(bc.chain, newBlock)
-
-	go saveBlock(newBlock)
 }
 
 // calculateBlockStats calculates statistics for the values in a block
@@ -114,16 +119,24 @@ func calculateHash(block *Block) string {
 
 // generateValues generates random values every 5 seconds and adds them to the blockchain
 func generateValuesAndAddToBlockchain(bc *Blockchain) {
-	for {
-		time.Sleep(5 * time.Second)
-		var values []float64
-		for i := 0; i < 5; i++ {
-			value := rand.Float64() * 100
-			values = append(values, value)
+	valuesChan := make(chan []float64, 10)
+
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			var values []float64
+			for i := 0; i < 100; i++ {
+				value := rand.Float64()
+				values = append(values, value)
+			}
+			valuesChan <- values
 		}
+	}()
+	for values := range valuesChan {
 		bc.AddBlock(values)
 	}
 }
+
 func calculateMean(values []float64) float64 {
 	sum := 0.0
 	for _, value := range values {
@@ -167,9 +180,57 @@ func calculateVariance(values []float64, mean float64) float64 {
 func (bc *Blockchain) markBlocksWithOutliers() {
 	for _, block := range bc.chain {
 		if len(block.Outliers) > 0 {
-			block.Hash = "OUTLITER_BLOCK_HASH"
+			block.Hash = "OUTLIER_BLOCK_HASH"
 		}
 	}
+}
+
+func readDataFromExternalSource(filePath string, format string) ([][]float64, error) {
+	var data [][]float64
+
+	// Öffne die Datei
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	// Lese Daten je nach Dateiformat ein
+	switch format {
+	case "csv":
+		// CSV-Datei einlesen
+		reader := csv.NewReader(file)
+		records, err := reader.ReadAll()
+		if err != nil {
+			return nil, err
+		}
+
+		// Konvertiere die eingelesenen Daten in float64
+		for _, row := range records {
+			var floatRow []float64
+			for _, valueStr := range row {
+				value, err := strconv.ParseFloat(valueStr, 64)
+				if err != nil {
+					return nil, err
+				}
+				floatRow = append(floatRow, value)
+			}
+			data = append(data, floatRow)
+		}
+
+	case "json":
+		// JSON-Datei einlesen
+		decoder := json.NewDecoder(file)
+		err := decoder.Decode(&data)
+		if err != nil {
+			return nil, err
+		}
+
+	default:
+		return nil, fmt.Errorf("Ungültiges Dateiformat: %s", format)
+	}
+
+	return data, nil
 }
 
 // main function
@@ -183,7 +244,9 @@ func main() {
 		fmt.Println("Wählen Sie eine Aktion:")
 		fmt.Println("1. Aktuelle Werte ausgeben")
 		fmt.Println("2. Blockchain anzeigen")
-		fmt.Println("3. Programm beenden")
+		fmt.Println("3. Blöcke mit Ausreißern ausgeben")
+		fmt.Println("4. Daten aus externe Quelle einlesen und hinzufügen")
+		fmt.Println("5. Programm beenden")
 		fmt.Scanln(&choice)
 
 		switch choice {
@@ -192,7 +255,24 @@ func main() {
 		case 2:
 			printBlockchain(bc.chain)
 		case 3:
+			printOutlierBlocks(bc.chain)
+		case 4:
+			var filePath, format string
+			fmt.Println("Geben Sie den Dateipfad der externen Datenquelle ein:")
+			fmt.Scanln(&filePath)
+			fmt.Println("Geben Sie das Datenformat ein (csv oder json):")
+			fmt.Scanln(&format)
+
+			// Daten aus externer Quelle einlesen (ohne die data-Variable zu verwenden)
+			_, err := readDataFromExternalSource(filePath, format)
+			if err != nil {
+				fmt.Println("Fehler beim Einlesen der externen Datenquelle:", err)
+				continue
+			}
+
+		case 5:
 			return
+
 		default:
 			fmt.Println("Ungültige Auswahl!")
 		}
@@ -228,24 +308,11 @@ func printBlockchain(chain []*Block) {
 	}
 }
 
-// saveBlock saves a block to a log file
-func saveBlock(block *Block) {
-	file, err := os.OpenFile("blockchain.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Println("Fehler beim Öffnen der Log-Datei:", err)
-		return
-	}
-	defer file.Close()
-
-	blockJSON, err := json.Marshal(block)
-	if err != nil {
-		fmt.Println("Fehler beim Marshalling des Blocks:", err)
-		return
-	}
-
-	_, err = file.WriteString(string(blockJSON) + "\n")
-	if err != nil {
-		fmt.Println("Fehler beim Schreiben des Blocks in die Log-Datei:", err)
-		return
+func printOutlierBlocks(chain []*Block) {
+	fmt.Println("Blöcke mit Ausreißern:")
+	for _, block := range chain {
+		if len(block.Outliers) > 0 {
+			printBlock(block)
+		}
 	}
 }
